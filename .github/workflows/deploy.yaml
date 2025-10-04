@@ -1,0 +1,86 @@
+# Даем действие которе мы описываем 
+name: Deploy App
+
+# Мы сами будем устонавливаь тэг, и когда мы захотим сами задеплоить, мы нажмем кнопку деплой -
+# укажем нужный тэг, и по этому тегу будет происходить деплой 
+
+# Описываем в каких случаях будет тригириться наше действие
+on:
+  # указываем ручной запуск 
+  workflow_dispatch:
+    # говорим что будем ожидать некоторого инпута
+    inputs:
+    # В инпуте будет тэг
+      tag:
+        # Описание тэга
+        description: 'Tag to deply'
+        # Указываем что это обязательное поле
+        required: true
+
+jobs:
+  deploy:
+    # Говорим о том что мы хотим запускать на машине, на которой стоит ubuntu-latest 
+    runs-on: ubuntu-latest
+    env:
+      # Указываем переменные окружения, которые будут использоваться в самих шагах 
+      HOST: root@188.68.206.211
+      DEPLOY_DIRECTORY: /root/apps/grpc-auth
+      CONFIG_PATH: /root/apps/grpc-auth/config/prod.yaml
+
+    # Это те шаги которые github actions должен выполнить 
+    steps:
+    # Заберт текущий репозиторий к себе локльно
+      - name: Checkout repository
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.inputs.tag }}
+      # Далее проверяем существует ли тот тэг который мы указали во время деплоя 
+      - name: Check if tag exists
+        run: |
+          git fetch --all --tags
+          if ! git tag | grep -q "^${{ github.event.inputs.tag }}$"; then
+            echo "error: Tag '${{ github.event.inputs.tag }}' not found"
+            exit 1
+          fi
+        # Устонавливает Go
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.21.2
+        # Выполняем Build нашего приложения и пишем команду для сборки
+      - name: Build app
+        # Скачиваем все зависимости 
+        run: |
+          go mod download
+          go build -o grpc-auth ./cmd/sso
+      - name: Build migrator
+        run: |
+          go build -o migrator ./cmd/migrator
+        # Деплой на удаленный сервер, то есть мы берем бинарник который мы скомпилировали и отправляем его на удаленный сервер
+      - name: Deploy to VM
+        run: |
+          sudo apt-get install -y ssh rsync
+          echo "$DEPLOY_SSH_KEY" > deploy_key.pem
+          chmod 600 deploy_key.pem
+          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} "mkdir -p ${{ env.DEPLOY_DIRECTORY }}"
+          rsync -avz -e 'ssh -i deploy_key.pem -o StrictHostKeyChecking=no' --exclude='.git' ./ ${{ env.HOST }}:${{ env.DEPLOY_DIRECTORY }}
+          rsync -avz -e 'ssh -i deploy_key.pem -o StrictHostKeyChecking=no' ./migrator ${{ env.HOST }}:${{ env.DEPLOY_DIRECTORY }}/migrator
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      - name: Remove old systemd service file
+        run: |
+          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} "rm -f /etc/systemd/system/grpc-auth.service"
+      - name: List workspace contents
+        run: |
+          echo "Listing deployment folder contents:"
+          ls -la ${{ github.workspace }}/deployment
+      - name: Copy systemd service file
+        run: |
+          scp -i deploy_key.pem -o StrictHostKeyChecking=no ${{ github.workspace }}/deployment/grpc-auth.service ${{ env.HOST }}:/tmp/grpc-auth.service
+          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} "mv /tmp/grpc-auth.service /etc/systemd/system/grpc-auth.service"
+      - name: Run migrations
+        run: |
+          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} "${{ env.DEPLOY_DIRECTORY }}/migrator --storage-path=${{ env.DEPLOY_DIRECTORY }}/sso.db --migrations-path=${{ env.DEPLOY_DIRECTORY }}/migrations"
+      - name: Start application
+        run: |
+          ssh -i deploy_key.pem -o StrictHostKeyChecking=no ${{ env.HOST }} "systemctl daemon-reload && systemctl restart grpc-auth.service"
