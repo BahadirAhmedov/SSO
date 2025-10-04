@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Указываем переменные окружения, которые будут использоваться в самих шагах 
-      HOST: root@188.68.206.211
+      HOST: root@188.68.206.210
       DEPLOY_DIRECTORY: /root/apps/grpc-auth
       CONFIG_PATH: /root/apps/grpc-auth/config/prod.yaml
 
